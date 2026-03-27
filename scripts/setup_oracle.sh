@@ -48,16 +48,16 @@ sudo iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || \
     sudo iptables -I INPUT -p tcp --dport 80 -j ACCEPT
 sudo sh -c "iptables-save > /etc/iptables/rules.v4" 2>/dev/null || true
 
-echo "=== Enabling cron ==="
+echo "=== Setting up cron (daily scrape at 6 AM UTC) ==="
 sudo systemctl enable cron
 sudo systemctl start cron
+(crontab -l 2>/dev/null | grep -v "scrape.ts"; echo '0 6 * * * cd /home/ubuntu/comedy-nyc && /usr/bin/npx tsx scripts/scrape.ts >> /home/ubuntu/comedy-nyc/scrape.log 2>&1') | crontab -
 
 echo ""
 echo "=== Setup complete! ==="
 echo "Remaining steps:"
 echo "  1. Create .env file with API keys"
-echo "  2. sudo systemctl start comedy-nyc"
-echo "  3. Add cron: crontab -e"
-echo "     0 6 * * * cd ~/comedy-nyc && npx tsx scripts/scrape.ts >> ~/comedy-nyc/scrape.log 2>&1"
+echo "  2. npm run build"
+echo "  3. sudo systemctl start comedy-nyc"
 echo "  4. Point DNS A record to this server's IP"
 echo "  5. Open port 80 in OCI Security List"
