@@ -39,6 +39,7 @@ export async function GET(req: NextRequest) {
     date: s.date,
     time: s.time,
     venue_room: s.venue_room,
+    venue: s.venue ?? "Comedy Cellar",
     lineup_id: s.lineup_id,
     reservation_url: s.reservation_url,
     comedians: s.comedian_ids

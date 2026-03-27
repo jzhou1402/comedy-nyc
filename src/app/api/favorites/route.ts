@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { getDb } from "@/lib/db";
+import { notifyFollowImmediate } from "@/lib/notify";
 
 export async function GET() {
   const session = await auth();
@@ -39,6 +40,9 @@ export async function POST(req: NextRequest) {
     VALUES (?, ?, ?)
     ON CONFLICT(user_id, comedian_id) DO UPDATE SET reason = excluded.reason
   `).run(user.id, comedian_id, reason ?? null);
+
+  // Fire-and-forget: email user about upcoming shows for this comedian
+  notifyFollowImmediate(user.id, comedian_id).catch(() => {});
 
   return NextResponse.json({ ok: true });
 }

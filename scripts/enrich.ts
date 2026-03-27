@@ -1,11 +1,11 @@
 /**
- * Enrich comedian profiles with bios.
+ * Enrich comedian profiles with bios and social links.
  *
  * Usage:
  *   OPENAI_API_KEY=sk-... npx tsx scripts/enrich.ts
  *
  * Options:
- *   --force    Re-generate bios even for comedians that already have one
+ *   --force    Re-generate even for comedians that already have a bio
  *   --limit N  Only process N comedians
  */
 import Database from "better-sqlite3";
@@ -15,16 +15,19 @@ import OpenAI from "openai";
 const db = new Database(path.join(process.cwd(), "comedy.db"));
 db.pragma("journal_mode = WAL");
 
-// Ensure bio column exists
-const cols = db.prepare("PRAGMA table_info(comedians)").all() as { name: string }[];
-if (!cols.some((c) => c.name === "bio")) {
-  db.exec("ALTER TABLE comedians ADD COLUMN bio TEXT");
+// Ensure columns exist
+for (const col of ["bio", "instagram_url", "twitter_url", "tiktok_url", "youtube_url"]) {
+  const cols = db.prepare("PRAGMA table_info(comedians)").all() as { name: string }[];
+  if (!cols.some((c) => c.name === col)) {
+    db.exec(`ALTER TABLE comedians ADD COLUMN ${col} TEXT`);
+  }
 }
 
 const client = new OpenAI();
 
 const args = process.argv.slice(2);
 const force = args.includes("--force");
+const socialsOnly = args.includes("--socials-only");
 const limitIdx = args.indexOf("--limit");
 const limit = limitIdx !== -1 ? parseInt(args[limitIdx + 1]) : undefined;
 
@@ -40,75 +43,116 @@ async function searchWeb(query: string): Promise<string> {
   try {
     const res = await fetch(
       `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
-      {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (compatible; ComedyNYC/1.0)",
-        },
-      }
+      { headers: { "User-Agent": "Mozilla/5.0 (compatible; ComedyNYC/1.0)" } }
     );
     const html = await res.text();
     const snippets: string[] = [];
-    const regex = /class="result__snippet"[^>]*>(.*?)<\//gs;
+    // Extract snippets
+    const snippetRegex = /class="result__snippet"[^>]*>(.*?)<\//gs;
     let match;
-    while ((match = regex.exec(html)) !== null) {
+    while ((match = snippetRegex.exec(html)) !== null) {
       snippets.push(match[1].replace(/<[^>]+>/g, "").trim());
     }
-    return snippets.slice(0, 5).join("\n") || "No search results found.";
+    // Extract URLs for social links
+    const urls: string[] = [];
+    const urlRegex = /class="result__url"[^>]*>(.*?)<\//gs;
+    while ((match = urlRegex.exec(html)) !== null) {
+      urls.push(match[1].replace(/<[^>]+>/g, "").trim());
+    }
+    return [...snippets.slice(0, 5), "\nURLs found:", ...urls.slice(0, 10)].join("\n") || "No results.";
   } catch {
     return "Search failed.";
   }
 }
 
-async function generateBio(comedian: Comedian, searchResults: string): Promise<string> {
+interface EnrichResult {
+  bio: string;
+  instagram: string | null;
+  twitter: string | null;
+  tiktok: string | null;
+  youtube: string | null;
+}
+
+async function enrichComedian(comedian: Comedian, searchResults: string): Promise<EnrichResult> {
   const response = await client.chat.completions.create({
     model: "gpt-4o-mini",
-    max_tokens: 300,
+    max_tokens: 400,
     messages: [
       {
-        role: "user",
-        content: `Write a fun, punchy 2-3 sentence bio for comedian ${comedian.name} who performs at the Comedy Cellar in NYC.
+        role: "system",
+        content: `You enrich comedian profiles. Return a JSON object with these fields:
+- "bio": A fun, punchy 2-3 sentence bio. Be playful like a comedy show intro. Only reference real credits from the search results — do NOT make up awards or shows.
+- "instagram": Full Instagram URL if found in search results, or null
+- "twitter": Full Twitter/X URL if found, or null
+- "tiktok": Full TikTok URL if found, or null
+- "youtube": Full YouTube URL if found, or null
 
+Only return the JSON object, nothing else.`,
+      },
+      {
+        role: "user",
+        content: `Comedian: ${comedian.name}
 Known credits: ${comedian.credits || "none listed"}
 Website: ${comedian.website_url || "none"}
 
-Here's what I found about them online:
-${searchResults}
-
-Rules:
-- Be playful and engaging, like a comedy show intro
-- Mention their most notable credit or achievement if known
-- If you can't find much info, write something witty based on what little we know
-- Do NOT make up specific credits, shows, or awards — only reference things from the search results
-- Keep it to 2-3 sentences max
-- No quotes around the bio`,
+Search results:
+${searchResults}`,
       },
     ],
   });
 
-  return response.choices[0]?.message?.content?.trim() ?? "";
+  const text = response.choices[0]?.message?.content?.trim() ?? "{}";
+  try {
+    const parsed = JSON.parse(text);
+    return {
+      bio: parsed.bio ?? "",
+      instagram: parsed.instagram ?? null,
+      twitter: parsed.twitter ?? null,
+      tiktok: parsed.tiktok ?? null,
+      youtube: parsed.youtube ?? null,
+    };
+  } catch {
+    return { bio: text, instagram: null, twitter: null, tiktok: null, youtube: null };
+  }
 }
 
 async function main() {
   let query = `SELECT * FROM comedians`;
-  if (!force) query += ` WHERE bio IS NULL OR bio = ''`;
+  if (socialsOnly) {
+    query += ` WHERE instagram_url IS NULL AND twitter_url IS NULL AND tiktok_url IS NULL AND youtube_url IS NULL`;
+  } else if (!force) {
+    query += ` WHERE bio IS NULL OR bio = ''`;
+  }
   query += ` ORDER BY name`;
   if (limit) query += ` LIMIT ${limit}`;
 
   const comedians = db.prepare(query).all() as Comedian[];
   console.log(`Enriching ${comedians.length} comedians...`);
 
-  const updateBio = db.prepare("UPDATE comedians SET bio = ?, updated_at = datetime('now') WHERE id = ?");
+  const update = db.prepare(`
+    UPDATE comedians SET
+      bio = COALESCE(NULLIF(?, ''), bio),
+      instagram_url = COALESCE(?, instagram_url),
+      twitter_url = COALESCE(?, twitter_url),
+      tiktok_url = COALESCE(?, tiktok_url),
+      youtube_url = COALESCE(?, youtube_url),
+      updated_at = datetime('now')
+    WHERE id = ?
+  `);
 
   for (let i = 0; i < comedians.length; i++) {
     const c = comedians[i];
     console.log(`[${i + 1}/${comedians.length}] ${c.name}...`);
 
     try {
-      const searchResults = await searchWeb(`${c.name} comedian`);
+      const searchResults = await searchWeb(`${c.name} comedian instagram twitter`);
       await new Promise((r) => setTimeout(r, 500));
-      const bio = await generateBio(c, searchResults);
-      updateBio.run(bio, c.id);
-      console.log(`  -> ${bio.substring(0, 80)}...`);
+      const result = await enrichComedian(c, searchResults);
+      update.run(result.bio, result.instagram, result.twitter, result.tiktok, result.youtube, c.id);
+
+      const socials = [result.instagram, result.twitter, result.tiktok, result.youtube].filter(Boolean);
+      console.log(`  -> ${result.bio.substring(0, 70)}...`);
+      if (socials.length) console.log(`  -> Socials: ${socials.join(", ")}`);
     } catch (e) {
       console.error(`  x Failed: ${e}`);
     }
