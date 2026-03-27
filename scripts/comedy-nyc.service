@@ -1,0 +1,14 @@
+[Unit]
+Description=Comedy NYC
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/comedy-nyc
+ExecStart=/usr/bin/npm start
+Restart=always
+RestartSec=5
+EnvironmentFile=/home/ubuntu/comedy-nyc/.env
+
+[Install]
+WantedBy=multi-user.target
